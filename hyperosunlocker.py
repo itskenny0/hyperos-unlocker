@@ -3,6 +3,7 @@ import json
 import random
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -143,6 +144,12 @@ APPLY_URL = "https://sgp-api.buy.mi.com/bbs/api/global/apply/bl-auth"
 FEED_TIME_MS = 1400.0                  # lead time so requests land at the reset
 FEED_TIME_S = FEED_TIME_MS / 1000.0
 
+TOKEN_FILE = "token.txt"               # persisted new_bbs_serviceToken
+REVALIDATE_INTERVAL_S = 30.0           # token liveness probe cadence during the hold
+
+BURST_WORKERS = 8                      # parallel request threads during the burst
+BURST_JITTER_MS = (0, 100)             # per-request random stagger, milliseconds
+
 
 # ──────────────────────────────────────────────────────────────────────────
 #  Core logic
@@ -203,7 +210,13 @@ def render_countdown(frame, remaining, target_time, frac):
     live(txt)
 
 
-def wait_until_target_time(start_beijing_time, start_timestamp):
+def _next_revalidate_delay():
+    """Spacing for the next liveness probe — ~30s with a little natural variance."""
+    return REVALIDATE_INTERVAL_S + random.uniform(-5.0, 5.0)
+
+
+def wait_until_target_time(session, cookie_value, device_id,
+                           start_beijing_time, start_timestamp):
     next_day = start_beijing_time + timedelta(days=1)
     target_time = (next_day.replace(hour=0, minute=0, second=0, microsecond=0)
                    - timedelta(seconds=FEED_TIME_S))
@@ -211,15 +224,33 @@ def wait_until_target_time(start_beijing_time, start_timestamp):
 
     info(f"phase shift locked at {AMBER}{FEED_TIME_MS:.0f} ms{RESET}")
     info(f"firing window {AMBER}{target_time.strftime('%Y-%m-%d %H:%M:%S')}{RESET} (UTC+8)")
+    info(f"token revalidated every {AMBER}~{REVALIDATE_INTERVAL_S:.0f}s{RESET} while holding")
     print(f"  {MUTED}do not exit — holding for the reset…{RESET}\n")
 
     frame = 0
     last_render = 0.0
+    last_revalidate = time.time()
+    revalidate_delay = _next_revalidate_delay()
     while True:
         current_time = get_synchronized_beijing_time(start_beijing_time, start_timestamp)
         time_diff = (target_time - current_time).total_seconds()
-
         now = time.time()
+
+        # Periodic liveness probe during the long hold (skip the final seconds so
+        # we never add latency right before the burst).
+        if time_diff > 5 and now - last_revalidate >= revalidate_delay:
+            last_revalidate = now
+            revalidate_delay = _next_revalidate_delay()
+            if validate_token(session, cookie_value, device_id) == "expired":
+                clear_live()
+                warn("token expired during the wait — refresh it to stay armed")
+                show_auth_panel()
+                cookie_value = acquire_token(session, device_id)
+                ok("token refreshed — resuming countdown")
+                now = time.time()
+                last_revalidate = now
+            last_render = 0.0  # force an immediate redraw
+
         if now - last_render >= 0.08:
             frac = 1.0 - (time_diff / total) if total > 0 else 1.0
             render_countdown(frame, time_diff, target_time, frac)
@@ -235,6 +266,8 @@ def wait_until_target_time(start_beijing_time, start_timestamp):
             break
         else:
             time.sleep(0.0001)
+
+    return cookie_value
 
 
 def check_unlock_status(session, cookie_value, device_id):
@@ -294,7 +327,7 @@ def check_unlock_status(session, cookie_value, device_id):
 class HTTP11Session:
     def __init__(self):
         self.http = urllib3.PoolManager(
-            maxsize=10,
+            maxsize=max(10, BURST_WORKERS),
             retries=True,
             timeout=urllib3.Timeout(connect=2.0, read=15.0),
             headers={},
@@ -331,16 +364,130 @@ def prompt_token():
     return input().strip()
 
 
-def fire_requests(session, cookie_value, device_id, start_beijing_time, start_timestamp):
-    headers = cookie_header(cookie_value, device_id)
-    attempt = 0
+def show_auth_panel():
+    """Render the login instructions and the Xiaomi sign-in URL."""
+    print()
+    print(panel("AUTHENTICATE", [
+        f"{TEXT}Open the Xiaomi login URL below in your browser and sign in.{RESET}",
+        f"{TEXT}Then open DevTools → Application → Cookies and copy the{RESET}",
+        f"{TEXT}value of {AMBER}{BOLD}new_bbs_serviceToken{RESET}{TEXT}.{RESET}",
+    ]))
+    print()
+    print(f"  {MUTED}↗ open this url{RESET}")
+    print(f"  {CYAN}{MI_ACCOUNT_URL}{RESET}")
+    print()
+
+
+def load_token():
+    """Return the persisted token, or None if there isn't a usable one."""
+    try:
+        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+            value = f.read().strip()
+        return value or None
+    except OSError:
+        return None
+
+
+def save_token(value):
+    """Persist the token so the next run can reuse it."""
+    try:
+        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(value)
+    except OSError as e:
+        warn(f"could not save token to {TOKEN_FILE} {MUTED}({e}){RESET}")
+
+
+def validate_token(session, cookie_value, device_id):
+    """Lightweight liveness probe — a single state GET, never an unlock request.
+
+    Returns 'valid', 'expired', or 'error' (transient/network)."""
+    response = session.make_request("GET", STATE_URL,
+                                    headers=cookie_header(cookie_value, device_id))
+    if response is None:
+        return "error"
+    try:
+        response_data = json.loads(response.data.decode("utf-8"))
+        response.release_conn()
+    except Exception:
+        return "error"
+    return "expired" if response_data.get("code") == 100004 else "valid"
+
+
+def acquire_token(session, device_id):
+    """Prompt for a token, persist it, and confirm it is live. Loops until valid."""
     while True:
-        attempt += 1
+        cookie_value = prompt_token()
+        if not cookie_value:
+            warn("no token entered — try again")
+            continue
+        save_token(cookie_value)
+        state = validate_token(session, cookie_value, device_id)
+        if state == "expired":
+            err("that token is already expired — paste a fresh one")
+            continue
+        # 'valid', or 'error' (network blip) → accept and let later steps surface issues
+        return cookie_value
+
+
+def resolve_token(session, device_id):
+    """Reuse a saved token when it's still live, otherwise prompt for a new one."""
+    saved = load_token()
+    if saved:
+        info(f"found a saved token in {AMBER}{TOKEN_FILE}{RESET} — checking it…")
+        state = validate_token(session, saved, device_id)
+        if state == "valid":
+            ok("saved token is live — reusing it")
+            return saved
+        if state == "expired":
+            warn("saved token has expired — a fresh one is needed")
+        else:
+            warn("couldn't verify the saved token (network) — reusing it for now")
+            return saved
+    show_auth_panel()
+    return acquire_token(session, device_id)
+
+
+class BurstController:
+    """Coordinates the worker pool: shared attempt counter, a stop signal, the
+    first terminal outcome, and a lock so concurrent threads don't garble the
+    single-line status output."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.out_lock = threading.Lock()
+        self.stop = threading.Event()
+        self._attempt = 0
+        self.outcome = None  # set once; first writer wins
+
+    def next_attempt(self):
+        with self._lock:
+            self._attempt += 1
+            return self._attempt
+
+    def set_outcome(self, kind, data=None):
+        """Record the first terminal outcome and signal every worker to halt."""
+        with self._lock:
+            if self.outcome is None:
+                self.outcome = (kind, data or {})
+                self.stop.set()
+
+
+def _burst_worker(session, headers, ctrl, start_beijing_time, start_timestamp, jitter):
+    """One pool thread: fire POSTs in a loop until a terminal outcome is hit
+    (by any worker) or the stop signal is raised. Non-terminal responses just
+    update the live status line and the worker keeps going.
+
+    ``jitter`` is a (min, max) millisecond range for the per-request stagger;
+    (0, 0) means fire back-to-back with no delay (sequential mode)."""
+    while not ctrl.stop.is_set():
+        attempt = ctrl.next_attempt()
         request_time = get_synchronized_beijing_time(start_beijing_time, start_timestamp)
         response = session.make_request("POST", APPLY_URL, headers=headers)
         if response is None:
-            live(f"{CORAL}✗{RESET}  {MUTED}#{attempt:03d}{RESET} network error  "
-                 f"{DIM}retrying…{RESET}")
+            with ctrl.out_lock:
+                live(f"{CORAL}✗{RESET}  {MUTED}#{attempt:03d}{RESET} network error  "
+                     f"{DIM}retrying…{RESET}")
+            ctrl.stop.wait(random.uniform(*jitter) / 1000.0)
             continue
 
         response_time = get_synchronized_beijing_time(start_beijing_time, start_timestamp)
@@ -360,72 +507,120 @@ def fire_requests(session, cookie_value, device_id, start_beijing_time, start_ti
             if code == 0:
                 apply_result = data.get("apply_result")
                 if apply_result == 1:
-                    clear_live()
-                    ok(f"{tag}  request {MINT}{BOLD}APPROVED{RESET} — verifying")
-                    check_unlock_status(session, cookie_value, device_id)
+                    ctrl.set_outcome("verify", {"tag": tag, "approved": True})
+                    return
                 elif apply_result == 3:
-                    clear_live()
-                    deadline = data.get("deadline_format", "—")
-                    result("QUOTA REACHED", [
-                        f"{TEXT}Today's unlock slots are gone.{RESET}",
-                        f"{MUTED}Retry at {AMBER}{deadline}{RESET}"
-                        f"{MUTED} (MM/DD), 00:00 Beijing.{RESET}",
-                    ], AMBER_HI)
-                    sys.exit(0)
+                    ctrl.set_outcome("quota", {"data": data})
+                    return
                 elif apply_result == 4:
-                    clear_live()
-                    deadline = data.get("deadline_format", "—")
-                    result("ACCOUNT BLOCKED", [
-                        f"{TEXT}This account is temporarily blocked.{RESET}",
-                        f"{MUTED}Blocked until {AMBER}{deadline}{RESET}"
-                        f"{MUTED} (MM/DD).{RESET}",
-                    ], CORAL)
-                    sys.exit(0)
+                    ctrl.set_outcome("blocked", {"data": data})
+                    return
                 else:
-                    live(f"{CYAN}•{RESET}  {tag}  apply_result={apply_result}")
+                    with ctrl.out_lock:
+                        live(f"{CYAN}•{RESET}  {tag}  apply_result={apply_result}")
             elif code == 100001:
                 # High-frequency rejection — update in place rather than flood.
-                live(f"{CORAL}✗{RESET}  {tag}  rejected  {DIM}retrying…{RESET}")
+                with ctrl.out_lock:
+                    live(f"{CORAL}✗{RESET}  {tag}  rejected  {DIM}retrying…{RESET}")
             elif code == 100003:
-                clear_live()
-                warn(f"{tag}  possibly approved — verifying")
-                check_unlock_status(session, cookie_value, device_id)
+                ctrl.set_outcome("verify", {"tag": tag, "approved": False})
+                return
             elif code is not None:
-                clear_live()
-                info(f"{tag}  unknown code {code}  {MUTED}{jr}{RESET}")
+                with ctrl.out_lock:
+                    clear_live()
+                    info(f"{tag}  unknown code {code}  {MUTED}{jr}{RESET}")
             else:
-                clear_live()
-                err(f"{tag}  response missing status code  {MUTED}{jr}{RESET}")
+                with ctrl.out_lock:
+                    clear_live()
+                    err(f"{tag}  response missing status code  {MUTED}{jr}{RESET}")
 
         except json.JSONDecodeError:
-            clear_live()
-            err(f"#{attempt:03d}  invalid JSON from server")
-        except SystemExit:
-            raise
+            with ctrl.out_lock:
+                clear_live()
+                err(f"#{attempt:03d}  invalid JSON from server")
         except Exception as e:
+            with ctrl.out_lock:
+                clear_live()
+                err(f"#{attempt:03d}  {e}")
+
+        ctrl.stop.wait(random.uniform(*jitter) / 1000.0)
+
+
+def _run_burst(session, headers, start_beijing_time, start_timestamp, worker_count, jitter):
+    """Launch ``worker_count`` request threads and block until a terminal
+    outcome is recorded. Returns the BurstController carrying that outcome.
+
+    With ``worker_count=1`` and ``jitter=(0, 0)`` this is the original
+    single-stream sequential burst."""
+    ctrl = BurstController()
+    workers = [
+        threading.Thread(
+            target=_burst_worker,
+            args=(session, headers, ctrl, start_beijing_time, start_timestamp, jitter),
+            daemon=True,
+        )
+        for _ in range(worker_count)
+    ]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    return ctrl
+
+
+def fire_requests(session, cookie_value, device_id, start_beijing_time, start_timestamp,
+                  pressure=False):
+    headers = cookie_header(cookie_value, device_id)
+    worker_count = BURST_WORKERS if pressure else 1
+    jitter = BURST_JITTER_MS if pressure else (0, 0)
+    if pressure:
+        info(f"pressure mode — {AMBER}{worker_count}{RESET} parallel workers")
+    else:
+        info("sequential mode — single request stream "
+             f"{MUTED}(use --pressure for parallel){RESET}")
+    while True:
+        ctrl = _run_burst(session, headers, start_beijing_time, start_timestamp,
+                          worker_count, jitter)
+        kind, payload = ctrl.outcome
+
+        if kind == "verify":
             clear_live()
-            err(f"#{attempt:03d}  {e}")
+            tag = payload["tag"]
+            if payload["approved"]:
+                ok(f"{tag}  request {MINT}{BOLD}APPROVED{RESET} — verifying")
+            else:
+                warn(f"{tag}  possibly approved — verifying")
+            # May sys.exit on a confirmed unlock; otherwise resume the burst.
+            check_unlock_status(session, cookie_value, device_id)
             continue
+        elif kind == "quota":
+            clear_live()
+            deadline = payload["data"].get("deadline_format", "—")
+            result("QUOTA REACHED", [
+                f"{TEXT}Today's unlock slots are gone.{RESET}",
+                f"{MUTED}Retry at {AMBER}{deadline}{RESET}"
+                f"{MUTED} (MM/DD), 00:00 Beijing.{RESET}",
+            ], AMBER_HI)
+            sys.exit(0)
+        elif kind == "blocked":
+            clear_live()
+            deadline = payload["data"].get("deadline_format", "—")
+            result("ACCOUNT BLOCKED", [
+                f"{TEXT}This account is temporarily blocked.{RESET}",
+                f"{MUTED}Blocked until {AMBER}{deadline}{RESET}"
+                f"{MUTED} (MM/DD).{RESET}",
+            ], CORAL)
+            sys.exit(0)
 
 
-def main():
+def main(pressure=False):
     banner()
 
     # ── Step 1 · Authenticate ────────────────────────────────────────────
-    print()
-    print(panel("STEP 1 · AUTHENTICATE", [
-        f"{TEXT}Open the Xiaomi login URL below in your browser and sign in.{RESET}",
-        f"{TEXT}Then open DevTools → Application → Cookies and copy the{RESET}",
-        f"{TEXT}value of {AMBER}{BOLD}new_bbs_serviceToken{RESET}{TEXT}.{RESET}",
-    ]))
-    print()
-    print(f"  {MUTED}↗ open this url{RESET}")
-    print(f"  {CYAN}{MI_ACCOUNT_URL}{RESET}")
-    print()
-    cookie_value = prompt_token()
-
+    section("01", "AUTHENTICATE")
     device_id = generate_device_id()
     session = HTTP11Session()
+    cookie_value = resolve_token(session, device_id)
 
     # ── Step 2 · Account status ──────────────────────────────────────────
     section("02", "ACCOUNT STATUS")
@@ -444,13 +639,14 @@ def main():
 
     # ── Step 4 · Countdown ───────────────────────────────────────────────
     section("04", "COUNTDOWN TO RESET")
-    wait_until_target_time(start_beijing_time, start_timestamp)
+    cookie_value = wait_until_target_time(session, cookie_value, device_id,
+                                          start_beijing_time, start_timestamp)
 
     # ── Step 5 · Burst ───────────────────────────────────────────────────
     section("05", "REQUEST BURST")
     try:
         fire_requests(session, cookie_value, device_id,
-                      start_beijing_time, start_timestamp)
+                      start_beijing_time, start_timestamp, pressure=pressure)
     except SystemExit:
         raise
     except Exception as e:
@@ -459,8 +655,18 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="HyperOS bootloader unlock sniper.")
+    parser.add_argument(
+        "--pressure", action="store_true",
+        help=f"fire the burst with {BURST_WORKERS} jittered parallel workers "
+             "instead of a single sequential stream (default: off)")
+    cli_args = parser.parse_args()
+
     try:
-        main()
+        main(pressure=cli_args.pressure)
     except KeyboardInterrupt:
         print(f"\n  {MUTED}interrupted — exiting{RESET}")
         sys.exit(130)
