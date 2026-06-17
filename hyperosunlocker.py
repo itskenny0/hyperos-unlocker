@@ -20,7 +20,7 @@ except Exception:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Palette  ·  "midnight launch console"  —  amber on ink, electric accents
+#  Palette  ·  "midnight launch console"  -  amber on ink, electric accents
 # ──────────────────────────────────────────────────────────────────────────
 def _fg(r, g, b):
     return f"\x1b[38;2;{r};{g};{b}m"
@@ -211,7 +211,7 @@ def render_countdown(frame, remaining, target_time, frac):
 
 
 def _next_revalidate_delay():
-    """Spacing for the next liveness probe — ~30s with a little natural variance."""
+    """Spacing for the next liveness probe - ~30s with a little natural variance."""
     return REVALIDATE_INTERVAL_S + random.uniform(-5.0, 5.0)
 
 
@@ -225,7 +225,7 @@ def wait_until_target_time(session, cookie_value, device_id,
     info(f"phase shift locked at {AMBER}{FEED_TIME_MS:.0f} ms{RESET}")
     info(f"firing window {AMBER}{target_time.strftime('%Y-%m-%d %H:%M:%S')}{RESET} (UTC+8)")
     info(f"token revalidated every {AMBER}~{REVALIDATE_INTERVAL_S:.0f}s{RESET} while holding")
-    print(f"  {MUTED}do not exit — holding for the reset…{RESET}\n")
+    print(f"  {MUTED}do not exit - holding for the reset…{RESET}\n")
 
     frame = 0
     last_render = 0.0
@@ -243,10 +243,10 @@ def wait_until_target_time(session, cookie_value, device_id,
             revalidate_delay = _next_revalidate_delay()
             if validate_token(session, cookie_value, device_id) == "expired":
                 clear_live()
-                warn("token expired during the wait — refresh it to stay armed")
+                warn("token expired during the wait - refresh it to stay armed")
                 show_auth_panel()
                 cookie_value = acquire_token(session, device_id)
-                ok("token refreshed — resuming countdown")
+                ok("token refreshed - resuming countdown")
                 now = time.time()
                 last_revalidate = now
             last_render = 0.0  # force an immediate redraw
@@ -262,7 +262,7 @@ def wait_until_target_time(session, cookie_value, device_id,
         elif current_time >= target_time:
             clear_live()
             fired = current_time.strftime("%H:%M:%S.%f")[:-3]
-            ok(f"reset reached at {AMBER}{BOLD}{fired}{RESET} — firing")
+            ok(f"reset reached at {AMBER}{BOLD}{fired}{RESET} - firing")
             break
         else:
             time.sleep(0.0001)
@@ -282,7 +282,7 @@ def check_unlock_status(session, cookie_value, device_id):
         response.release_conn()
 
         if response_data.get("code") == 100004:
-            err("session token expired — grab a fresh cookie and retry")
+            err("session token expired - grab a fresh cookie and retry")
             sys.exit(1)
 
         data = response_data.get("data", {})
@@ -292,7 +292,7 @@ def check_unlock_status(session, cookie_value, device_id):
 
         if is_pass == 4:
             if button_state == 1:
-                ok("account eligible — requests will be sent")
+                ok("account eligible - requests will be sent")
                 return True
             if button_state == 2:
                 warn(f"requests blocked until {AMBER}{deadline}{RESET} {MUTED}(MM/DD){RESET}")
@@ -398,7 +398,7 @@ def save_token(value):
 
 
 def validate_token(session, cookie_value, device_id):
-    """Lightweight liveness probe — a single state GET, never an unlock request.
+    """Lightweight liveness probe - a single state GET, never an unlock request.
 
     Returns 'valid', 'expired', or 'error' (transient/network)."""
     response = session.make_request("GET", STATE_URL,
@@ -418,12 +418,12 @@ def acquire_token(session, device_id):
     while True:
         cookie_value = prompt_token()
         if not cookie_value:
-            warn("no token entered — try again")
+            warn("no token entered - try again")
             continue
         save_token(cookie_value)
         state = validate_token(session, cookie_value, device_id)
         if state == "expired":
-            err("that token is already expired — paste a fresh one")
+            err("that token is already expired - paste a fresh one")
             continue
         # 'valid', or 'error' (network blip) → accept and let later steps surface issues
         return cookie_value
@@ -433,15 +433,15 @@ def resolve_token(session, device_id):
     """Reuse a saved token when it's still live, otherwise prompt for a new one."""
     saved = load_token()
     if saved:
-        info(f"found a saved token in {AMBER}{TOKEN_FILE}{RESET} — checking it…")
+        info(f"found a saved token in {AMBER}{TOKEN_FILE}{RESET} - checking it…")
         state = validate_token(session, saved, device_id)
         if state == "valid":
-            ok("saved token is live — reusing it")
+            ok("saved token is live - reusing it")
             return saved
         if state == "expired":
-            warn("saved token has expired — a fresh one is needed")
+            warn("saved token has expired - a fresh one is needed")
         else:
-            warn("couldn't verify the saved token (network) — reusing it for now")
+            warn("couldn't verify the saved token (network) - reusing it for now")
             return saved
     show_auth_panel()
     return acquire_token(session, device_id)
@@ -519,7 +519,7 @@ def _burst_worker(session, headers, ctrl, start_beijing_time, start_timestamp, j
                     with ctrl.out_lock:
                         live(f"{CYAN}•{RESET}  {tag}  apply_result={apply_result}")
             elif code == 100001:
-                # High-frequency rejection — update in place rather than flood.
+                # High-frequency rejection - update in place rather than flood.
                 with ctrl.out_lock:
                     live(f"{CORAL}✗{RESET}  {tag}  rejected  {DIM}retrying…{RESET}")
             elif code == 100003:
@@ -574,9 +574,9 @@ def fire_requests(session, cookie_value, device_id, start_beijing_time, start_ti
     worker_count = BURST_WORKERS if pressure else 1
     jitter = BURST_JITTER_MS if pressure else (0, 0)
     if pressure:
-        info(f"pressure mode — {AMBER}{worker_count}{RESET} parallel workers")
+        info(f"pressure mode - {AMBER}{worker_count}{RESET} parallel workers")
     else:
-        info("sequential mode — single request stream "
+        info("sequential mode - single request stream "
              f"{MUTED}(use --pressure for parallel){RESET}")
     while True:
         ctrl = _run_burst(session, headers, start_beijing_time, start_timestamp,
@@ -587,15 +587,15 @@ def fire_requests(session, cookie_value, device_id, start_beijing_time, start_ti
             clear_live()
             tag = payload["tag"]
             if payload["approved"]:
-                ok(f"{tag}  request {MINT}{BOLD}APPROVED{RESET} — verifying")
+                ok(f"{tag}  request {MINT}{BOLD}APPROVED{RESET} - verifying")
             else:
-                warn(f"{tag}  possibly approved — verifying")
+                warn(f"{tag}  possibly approved - verifying")
             # May sys.exit on a confirmed unlock; otherwise resume the burst.
             check_unlock_status(session, cookie_value, device_id)
             continue
         elif kind == "quota":
             clear_live()
-            deadline = payload["data"].get("deadline_format", "—")
+            deadline = payload["data"].get("deadline_format", "-")
             result("QUOTA REACHED", [
                 f"{TEXT}Today's unlock slots are gone.{RESET}",
                 f"{MUTED}Retry at {AMBER}{deadline}{RESET}"
@@ -604,7 +604,7 @@ def fire_requests(session, cookie_value, device_id, start_beijing_time, start_ti
             sys.exit(0)
         elif kind == "blocked":
             clear_live()
-            deadline = payload["data"].get("deadline_format", "—")
+            deadline = payload["data"].get("deadline_format", "-")
             result("ACCOUNT BLOCKED", [
                 f"{TEXT}This account is temporarily blocked.{RESET}",
                 f"{MUTED}Blocked until {AMBER}{deadline}{RESET}"
@@ -626,14 +626,14 @@ def main(pressure=False):
     section("02", "ACCOUNT STATUS")
     step("checking account eligibility…")
     if not check_unlock_status(session, cookie_value, device_id):
-        err("status check failed — aborting")
+        err("status check failed - aborting")
         sys.exit(1)
 
     # ── Step 3 · Time sync ───────────────────────────────────────────────
     section("03", "TIME SYNC")
     start_beijing_time = get_initial_beijing_time()
     if start_beijing_time is None:
-        err("unable to retrieve Beijing time — aborting")
+        err("unable to retrieve Beijing time - aborting")
         sys.exit(1)
     start_timestamp = time.time()
 
@@ -668,5 +668,5 @@ if __name__ == "__main__":
     try:
         main(pressure=cli_args.pressure)
     except KeyboardInterrupt:
-        print(f"\n  {MUTED}interrupted — exiting{RESET}")
+        print(f"\n  {MUTED}interrupted - exiting{RESET}")
         sys.exit(130)

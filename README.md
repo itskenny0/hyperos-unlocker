@@ -1,20 +1,24 @@
 # Automated HyperOS Bootloader Unlocker
 
-The script reason is for help to "brute force" Xiaomi Community Forum Bootloader Unlock request avoiding request limit quota reaches.
+Helps you "brute force" the Xiaomi Community Forum bootloader unlock request at the daily reset, to avoid missing the limited request quota.
 
 ## Steps
-1. Install the requirements;
+1. Install the requirements:
 ```bash
 pip3 install -r requirements.txt
 ```
-2. Run script, it will open your browser;
-3. Get the cookie *new_bbs_serviceToken* value from DevTools;
-4. Paste at the script input;
-5. Wait until 00:00h Beijing time.
-6. When script done try add Mi Device add your device to MiUnlock at Developers Tools;
+2. Run the script. It will open your browser:
+```bash
+python3 hyperosunlocker.py
+```
+3. Get the `new_bbs_serviceToken` cookie value from DevTools.
+4. Paste it into the script when prompted.
+5. Wait until 00:00 Beijing time. The script fires the requests automatically.
+6. Once done, add your device to Mi Unlock in Developer Tools.
 
-## if success
-2. Download Mi Unlocker Windows utility and finish the unlock process.
+Pass `--pressure` to fire the burst with parallel workers instead of a single request stream.
 
-... else
-try again
+## If successful
+Download the Mi Unlock Windows utility and finish the unlock process.
+
+Otherwise, try again.
