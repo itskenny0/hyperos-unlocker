@@ -18,6 +18,9 @@ python3 hyperosunlocker.py
 
 Pass `--pressure` to fire the burst with parallel workers instead of a single request stream.
 
+Sometimes, the server will actually approve your request, but not answer this back to the script, so it cannot know.
+Once you obtained an unlock allowance, it must be used within a few days. I make it a habit to try the Mi Unlock in Developer Tools every few days when unlocking a device. Sometimes it will work despite the script having shown it failed. I cannot fix this without lowering the chances of success.
+
 ## If successful
 Download the Mi Unlock Windows utility and finish the unlock process.
 
